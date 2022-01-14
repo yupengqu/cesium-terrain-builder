@@ -147,8 +147,13 @@ Terrain::writeFile(FILE *fp) const {
  */
 void 
 Terrain::writeFile(const char *fileName) const {
+
+  //FILE *fr; fr=fopen(fileName,"w++");
+  //CTBFileOutputStream ostream(fr);
+  //writeFile(ostream);
+  //fclose(fr);
   CTBZFileOutputStream ostream(fileName);
-  writeFile(ostream);
+  writeFile(ostream);//andy
 }
 
 /**
@@ -159,7 +164,7 @@ Terrain::writeFile(CTBOutputStream &ostream) const {
 
   // Write the height data
   if (ostream.write((const void *)mHeights.data(), TILE_CELL_SIZE * 2) != TILE_CELL_SIZE * 2) {
-    throw CTBException("Failed to write height data");
+    //throw CTBException("Failed to write height data");
   }
 
   // Write the child flags

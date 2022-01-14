@@ -63,7 +63,7 @@ public:
     mTileSize(tileSize),
     mExtent(extent),
     mSRS(srs),
-    mInitialResolution((extent.getWidth() / rootTiles) / tileSize ),
+    mInitialResolution((extent.getWidth() / rootTiles) / tileSize ),//tile0每个像素的距离
     mXOriginShift(extent.getWidth() / 2),
     mYOriginShift(extent.getHeight() / 2),
     mZoomFactor(zoomFactor)

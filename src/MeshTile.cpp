@@ -29,6 +29,7 @@
 #include "MeshTile.hpp"
 #include "BoundingSphere.hpp"
 #include "CTBZOutputStream.hpp"
+#include "CTBFileOutputStream.hpp"
 
 using namespace ctb;
 
@@ -207,8 +208,14 @@ MeshTile::MeshTile(const TileCoordinate &coord):
  */
 void 
 MeshTile::writeFile(const char *fileName, bool writeVertexNormals) const {
-  CTBZFileOutputStream ostream(fileName);
+  FILE *fr; fr=fopen(fileName,"w++");
+  CTBFileOutputStream ostream(fr);
   writeFile(ostream);
+  fclose(fr);
+
+
+  //CTBZFileOutputStream ostream(fileName);
+  //writeFile(ostream);//andy
 }
 
 /**

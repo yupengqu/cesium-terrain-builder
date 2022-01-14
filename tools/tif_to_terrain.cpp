@@ -53,7 +53,8 @@
 #include "MeshIterator.hpp"
 #include "GDALDatasetReader.hpp"
 #include "CTBFileTileSerializer.hpp"
-
+#include "HeightFieldChunker.hpp"
+#include "MeshTiler.hpp"
 using namespace std;
 using namespace ctb;
 
@@ -269,6 +270,84 @@ static void setLayerEndY(command_t *command) {
   bool metadata;
   bool cesiumFriendly;
   bool vertexNormals;
+};
+
+
+class WrapperMesh : public ctb::chunk::mesh {
+private:
+  CRSBounds &mBounds;
+  Mesh &mMesh;
+  double mCellSizeX;
+  double mCellSizeY;
+
+  std::map<int, int> mIndicesMap;
+  Coordinate<int> mTriangles[3];
+  bool mTriOddOrder;
+  int mTriIndex;
+
+public:
+  WrapperMesh(CRSBounds &bounds, Mesh &mesh, i_tile tileSizeX, i_tile tileSizeY):
+    mMesh(mesh),
+    mBounds(bounds),
+    mTriOddOrder(false),
+    mTriIndex(0) {
+    mCellSizeX = (bounds.getMaxX() - bounds.getMinX()) / (double)(tileSizeX - 1);
+    mCellSizeY = (bounds.getMaxY() - bounds.getMinY()) / (double)(tileSizeY - 1);
+  }
+
+  virtual void clear() {
+    mMesh.vertices.clear();
+    mMesh.indices.clear();
+    mIndicesMap.clear();
+    mTriOddOrder = false;
+    mTriIndex = 0;
+  }
+  virtual void emit_vertex(const ctb::chunk::heightfield &heightfield, int x, int y) {
+    mTriangles[mTriIndex].x = x;
+    mTriangles[mTriIndex].y = y;
+    mTriIndex++;
+
+    if (mTriIndex == 3) {
+      mTriOddOrder = !mTriOddOrder;
+
+      if (mTriOddOrder) {
+        appendVertex(heightfield, mTriangles[0].x, mTriangles[0].y);
+        appendVertex(heightfield, mTriangles[1].x, mTriangles[1].y);
+        appendVertex(heightfield, mTriangles[2].x, mTriangles[2].y);
+      }
+      else {
+        appendVertex(heightfield, mTriangles[1].x, mTriangles[1].y);
+        appendVertex(heightfield, mTriangles[0].x, mTriangles[0].y);
+        appendVertex(heightfield, mTriangles[2].x, mTriangles[2].y);
+      }
+      mTriangles[0].x = mTriangles[1].x;
+      mTriangles[0].y = mTriangles[1].y;
+      mTriangles[1].x = mTriangles[2].x;
+      mTriangles[1].y = mTriangles[2].y;
+      mTriIndex--;
+    }
+  }
+  void appendVertex(const ctb::chunk::heightfield &heightfield, int x, int y) {
+    int iv;
+    int index = heightfield.indexOfGridCoordinate(x, y);
+
+    std::map<int, int>::iterator it = mIndicesMap.find(index);
+
+    if (it == mIndicesMap.end()) {
+      iv = mMesh.vertices.size();
+
+      double xmin = mBounds.getMinX();
+      double ymax = mBounds.getMaxY();
+      double height = heightfield.height(x, y);
+
+      mMesh.vertices.push_back(CRSVertex(xmin + (x * mCellSizeX), ymax - (y * mCellSizeY), height));
+      mIndicesMap.insert(std::make_pair(index, iv));
+    }
+    else {
+      iv = it->second;
+    }
+    mMesh.indices.push_back(iv);
+  }
 };
 
 /**
@@ -833,123 +912,44 @@ command.option("-S", "--end-y <ey>", "tile’s end y", TerrainBuild::setLayerEnd
 
   GDALAllRegister();
 
-  // Set the output type
-  if (command.verbosity > 1) {
-    progressFunc = verboseProgress; // noisy
-  } else if (command.verbosity < 1) {
-    progressFunc = GDALDummyProgress; // quiet
-  }
+    GDALDataset  *poDataset = (GDALDataset *) GDALOpen(command.getInputFilename(), GA_ReadOnly);
 
-  // Check whether or not the output directory exists
-  VSIStatBufL stat;
-  if (VSIStatExL(command.outputDir, &stat, VSI_STAT_EXISTS_FLAG | VSI_STAT_NATURE_FLAG)) {
-    cerr << "Error: The output directory does not exist: " << command.outputDir << endl;
-    return 1;
-  } else if (!VSI_ISDIR(stat.st_mode)) {
-    cerr << "Error: The output filepath is not a directory: " << command.outputDir << endl;
+    std::cout<< command.getInputFilename()<<std::endl;
+  if (poDataset == NULL) {
+    cerr << "Error: could not open GDAL dataset" << endl;
     return 1;
   }
 
-  // Define the grid we are going to use
-  Grid grid;
-  if (strcmp(command.profile, "geodetic") == 0) {
-    int tileSize = (command.tileSize < 1) ? 65 : command.tileSize;
-    grid = GlobalGeodetic(tileSize);
-  } else if (strcmp(command.profile, "mercator") == 0) {
-    int tileSize = (command.tileSize < 1) ? 256 : command.tileSize;
-    grid = GlobalMercator(tileSize);
-  } else {
-    cerr << "Error: Unknown profile: " << command.profile << endl;
-    return 1;
+  const ctb::i_tile TILE_CELL_SIZE = 65 * 65;
+  float *rasterHeights = (float *)CPLCalloc(TILE_CELL_SIZE, sizeof(float));
+
+  GDALRasterBand *heightsBand = poDataset->GetRasterBand(1);
+
+  if (heightsBand->RasterIO(GF_Read, 0, 0, 65, 65,
+                            (void *) rasterHeights, 65, 65, GDT_Float32,
+                            0, 0) != CE_None) {
+   
+    CPLFree(rasterHeights);
+
+    throw CTBException("Could not read heights from raster");
   }
 
-  // Run the tilers in separate threads
-  vector<future<int>> tasks;
-  int threadCount = (command.threadCount > 0) ? command.threadCount : CPLGetNumCPUs();
+  // Get a mesh tile represented by the tile coordinate
+ // TerrainTile *terrainTile = new TerrainTile();
+  //prepareSettingsOfTile(terrainTile, dataset, coord, rasterHeights, mGrid.tileSize(), mGrid.tileSize());
+ // const ctb::i_tile TILE_CELL_SIZE = 65 * 65;
 
-  // Calculate metadata?
-  const string dirname = string(command.outputDir) + osDirSep;
-  const std::string filename = concat(dirname, "layer.json");
-  TerrainMetadata *metadata = command.metadata ? new TerrainMetadata() : NULL;
+  // Convert the raster data into the terrain tile heights.  This assumes the
+  // input raster data represents meters above sea level. Each terrain height
+  // value is the number of 1/5 meter units above -1000 meters.
+  // TODO: try doing this using a VRT derived band:
+  // (http://www.gdal.org/gdal_vrttut.html)
+ // for (unsigned short int i = 0; i < TILE_CELL_SIZE; i++) {
+ //   terrainTile->mHeights[i] = (i_terrain_height) ((rasterHeights[i] + 1000) * 5);
+ // }
 
-  // Instantiate the threads using futures from a packaged_task
-  for (int i = 0; i < threadCount ; ++i) {
-    packaged_task<int(const char *, TerrainBuild *, Grid *, TerrainMetadata *)> task(runTiler); // wrap the function
-    tasks.push_back(task.get_future()); // get a future
-    thread(move(task), command.getInputFilename(), &command, &grid, metadata).detach(); // launch on a thread
-  }
+  CPLFree(rasterHeights);
 
-  // Synchronise the completion of the threads
-  for (auto &task : tasks) {
-    task.wait();
-  }
-
-  // Get the value from the futures
-  for (auto &task : tasks) {
-    int retval = task.get();
-
-    // return on the first encountered problem
-    if (retval) {
-      delete metadata;
-      return retval;
-    }
-  }
-
-  // CesiumJS friendly?
-  if (command.cesiumFriendly && (strcmp(command.profile, "geodetic") == 0) && command.endZoom <= 0) {
-
-    // Create missing root tiles if it is necessary
-    if (!command.metadata) {
-      std::string dirName0 = string(command.outputDir) + osDirSep + "0" + osDirSep + "0";
-      std::string dirName1 = string(command.outputDir) + osDirSep + "0" + osDirSep + "1";
-      std::string tileName0 = dirName0 + osDirSep + "0.terrain";
-      std::string tileName1 = dirName1 + osDirSep + "0.terrain";
-
-      i_zoom missingZoom = 65535;
-      ctb::TileCoordinate missingTileCoord(missingZoom, 0, 0);
-      std::string missingTileName;
-
-      if (fileExists(tileName0) && !fileExists(tileName1)) {
-        VSIMkdir(dirName1.c_str(), 0755);
-        missingTileCoord = ctb::TileCoordinate(0, 1, 0);
-        missingTileName = tileName1;
-      }
-      else
-      if (!fileExists(tileName0) && fileExists(tileName1)) {
-        VSIMkdir(dirName0.c_str(), 0755);
-        missingTileCoord = ctb::TileCoordinate(0, 0, 0);
-        missingTileName = tileName0;
-      }
-      if (missingTileCoord.zoom != missingZoom) {
-        globalIteratorIndex = 0; // reset global iterator index
-        command.startZoom = 0;
-        command.endZoom = 0;
-        missingTileName = createEmptyRootElevationFile(missingTileName, grid, missingTileCoord);
-        runTiler (missingTileName.c_str(), &command, &grid, NULL);
-        VSIUnlink(missingTileName.c_str());
-      }
-    }
-
-    // Fix available indexes.
-    if (metadata && metadata->levels.size() > 0) {
-      TerrainMetadata::LevelInfo &level = metadata->levels.at(0);
-      level.startX = 0;
-      level.startY = 0;
-      level.finalX = 1;
-      level.finalY = 0;
-    }
-  }
-
-  // Write Json metadata file?
-  if (metadata) {
-    std::string datasetName(command.getInputFilename());
-    datasetName = datasetName.substr(datasetName.find_last_of("/\\") + 1);
-    const size_t rfindpos = datasetName.rfind('.');
-    if (std::string::npos != rfindpos) datasetName = datasetName.erase(rfindpos);
-
-    metadata->writeJsonFile(filename, datasetName, std::string(command.outputFormat), std::string(command.profile), command.vertexNormals);
-    delete metadata;
-  }
 
   return 0;
 }
